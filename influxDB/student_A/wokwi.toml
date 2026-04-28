@@ -1,0 +1,3 @@
+[wokwi]
+version = 1
+elf = "build/sketch.ino.elf"

@@ -1,36 +1,54 @@
 # simulator.py — Synthetic Microgrid Data Publisher
 import paho.mqtt.client as mqtt
-import json, time, random, math
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+import json
 
-MQTT_BROKER = "localhost"
-MQTT_PORT   = 1883
-PUBLISH_INTERVAL = 5  # seconds
+BROKER = "broker.hivemq.com"
+INFLUX_URL = "http://localhost:8086"
+INFLUX_TOKEN = "LYTUt9Lrt1CnPbJYUbw2-pmtPyliT-mqdcjkMV0Z119iyPSqSR1kJ_JEAClDU6s0l5MxvtREdJoTeSkmSZfAoQ=="
+INFLUX_ORG = "Microgrid_Project"
+INFLUX_BUCKET = "solar"
 
-client = mqtt.Client()
-client.connect(MQTT_BROKER, MQTT_PORT, 60)
+influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+write_api = influx.write_api(write_options=SYNCHRONOUS)
 
-def generate_reading(t):
-    """Generate realistic, time-correlated microgrid values."""
-    # Simulate solar irradiance cycle (peaks at midday)
-    solar_factor = max(0, math.sin(math.pi * (t % 86400) / 86400))
-    
-    return {
-        "node_id":     "node_01",
-        "source":      "solar",
-        "location":    "site_A",
-        "voltage":     round(random.uniform(17.0, 19.0), 2),
-        "soc":         round(random.uniform(20, 95) * solar_factor + 5, 1),  # SOC rises with sun
-        "current":     round(random.uniform(0.5, 5.5) * solar_factor, 2),
-        "power_kw":    round(random.uniform(0.1, 3.5) * solar_factor, 3),
-        "temperature": round(random.gauss(28.0, 3.0), 1),
-        "timestamp":   int(time.time())
-    }
 
-print(f"[SIM] Publishing to {MQTT_BROKER} every {PUBLISH_INTERVAL}s...")
-t = 0
-while True:
-    payload = generate_reading(t)
-    client.publish("microgrid/solar/node_01", json.dumps(payload))
-    print(f"[SIM] → {payload}")
-    t += PUBLISH_INTERVAL
-    time.sleep(PUBLISH_INTERVAL)
+
+def on_message(client, userdata, msg):
+    topic = msg.topic
+    field = topic.split("/")[-1]
+    payload = msg.payload.decode()
+
+    # Handle alert topic separately (it's JSON)
+    if field == "alert":
+        try:
+            data = json.loads(payload)
+            point = (Point("solar_panel")
+                     .field("alert_level", data.get("level", "unknown"))
+                     .field("alert_soc", float(data.get("soc", 0))))
+            write_api.write(bucket=INFLUX_BUCKET, record=point)
+            print(f"Wrote alert: {data}")
+        except Exception as e:
+            print(f"Alert parse error: {e}")
+        return
+
+    # Handle numeric topics
+    try:
+        value = float(payload)
+        point = Point("solar_panel").field(field, value)
+        write_api.write(bucket=INFLUX_BUCKET, record=point)
+        print(f"Wrote {field}={value} to InfluxDB")
+    except ValueError:
+        print(f"Skipping: {topic}: {payload}")
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.on_message = on_message
+client.connect(BROKER, 1883)
+client.subscribe("solar/voltage")
+client.subscribe("solar/current")
+client.subscribe("solar/power")
+client.subscribe("solar/soc")
+client.subscribe("solar/alert")
+
+client.loop_forever()
